@@ -3,20 +3,21 @@ from relprop.utility import common
 from relprop.modelparser import Model
 from relprop.modelchecker import ModelChecker
 import stormpy
+from stormpy import Rational
 
-import os
 import time
 import datetime
 
 from itertools import chain, combinations
 
 
-def buechi_processing(model, ind_dict, numInit, targets, targets_by_comb):
+def buechi_processing(model, ind_dict, numInit, targets, targets_by_comb, exact):
     common.colourinfo(f"{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")}: Constructing the MEC quotient...")
     quotient_construction_start_time = time.perf_counter()
     # construct MEC quotient
     ones_states = stormpy.storage.BitVector(model.parsed_model.nr_states, True)
     ones_rows = stormpy.storage.BitVector(model.parsed_model.transition_matrix.nr_rows, True)
+
     quotient = stormpy.eliminate_ECs(model.parsed_model.transition_matrix, ones_states, ones_rows, ones_states, True)
 
     # add sink for every MEC and every subset of target-comb-sets that we can ensure to visit infinitely often
@@ -82,8 +83,12 @@ def buechi_processing(model, ind_dict, numInit, targets, targets_by_comb):
                                 sinks_by_MEC[collapsed_state] = [subset]
 
     # rebuild quotient.matrix and add sinks
-    builder = stormpy.SparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
-                                          has_custom_row_grouping=True, row_groups=0)
+    if exact:
+        builder = stormpy.ExactSparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
+                                                   has_custom_row_grouping=True, row_groups=0)
+    else:
+        builder = stormpy.SparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
+                                              has_custom_row_grouping=True, row_groups=0)
     cur_row = 0
     cur_group = 0
     for state in range(0,quotient.matrix.nr_columns):
@@ -96,18 +101,24 @@ def buechi_processing(model, ind_dict, numInit, targets, targets_by_comb):
                 assert entry.value() != 0, "Something went wrong: An entry of the SparseMatrix quotient is 0"
                 # if transition in MEC quotient is not a self-floop: copy
                 if entry.column != cur_group:
-                    builder.add_next_value(cur_row, entry.column, entry.value())
+                    builder.add_next_value(cur_row, entry.column, entry.value()) # entry.value() is Rational if exact
                     flag = True
             if flag:
                 cur_row += 1
             if cur_group in sinks_by_MEC.keys():
                 for subset in sinks_by_MEC[cur_group]:
-                    builder.add_next_value(cur_row, quotient.matrix.nr_columns + sinks.index(subset), 1)
+                    if exact:
+                        builder.add_next_value(cur_row, quotient.matrix.nr_columns + sinks.index(subset), Rational(1))
+                    else:
+                        builder.add_next_value(cur_row, quotient.matrix.nr_columns + sinks.index(subset), 1)
                     cur_row += 1
         cur_group = cur_group + 1
     for subset in sinks:
         builder.new_row_group(cur_row)
-        builder.add_next_value(cur_row, quotient.matrix.nr_columns + sinks.index(subset), 1)
+        if exact:
+            builder.add_next_value(cur_row, quotient.matrix.nr_columns + sinks.index(subset), Rational(1))
+        else:
+            builder.add_next_value(cur_row, quotient.matrix.nr_columns + sinks.index(subset), 1)
         cur_group = cur_group +1
     processed_nr_states = cur_group
 
@@ -140,8 +151,14 @@ def buechi_processing(model, ind_dict, numInit, targets, targets_by_comb):
             if targets[i-1] in subset:
                 state_labeling.add_label_to_state(new_targets[i-1], quotient.matrix.nr_columns + sinks.index(subset))
 
-    components = stormpy.SparseModelComponents(transition_matrix=processed_matrix, state_labeling=state_labeling)
-    processed_model = stormpy.storage.SparseMdp(components)
+    if exact:
+        components = stormpy.SparseExactModelComponents(transition_matrix=processed_matrix,
+                                                        state_labeling=state_labeling)
+        processed_model = stormpy.storage.SparseExactMdp(components)
+    else:
+        components = stormpy.SparseModelComponents(transition_matrix=processed_matrix,
+                                                   state_labeling=state_labeling)
+        processed_model = stormpy.storage.SparseMdp(components)
     assert processed_nr_states == processed_model.nr_states, "Something went wrong: Processed model does not have expected no of states"
 
     quotient_construction_end_time = time.perf_counter()
@@ -151,77 +168,8 @@ def buechi_processing(model, ind_dict, numInit, targets, targets_by_comb):
 
     return processed_model, processed_ind_dict, new_targets
 
-def cast_to_reach(processed_model, equivClass):
-    ones_states = stormpy.storage.BitVector(processed_model.nr_states, True)
-    ones_rows = stormpy.storage.BitVector(processed_model.transition_matrix.nr_rows, True)
-    quotient = stormpy.eliminate_ECs(processed_model.transition_matrix, ones_states, ones_rows,
-                                     ones_states, True)
-    # copy reward models
-    quotient_reward_models = {}
-    new_to_old_state_mapping = {new_s: [i for i, x in enumerate(quotient.old_to_new_state_mapping) if x == new_s] for
-                                new_s in range(quotient.matrix.nr_columns)}
-    for pred in equivClass:
-        reward_label = f"R{pred}"
-        old_rew_matrix = processed_model.reward_models[reward_label].transition_rewards
-        # for each target collect all coefficients for this target in this predicate
-        transRewMatrixbuilder = stormpy.SparseMatrixBuilder(rows=0, columns=0, entries=0,
-                                                            force_dimensions=False,
-                                                            has_custom_row_grouping=False)
-        for new_s in range(quotient.matrix.nr_columns):
-            old_states = new_to_old_state_mapping[new_s]
-            for old_s in old_states:
-                rows = old_rew_matrix.get_rows_for_group(old_s)
-                for row in rows:
-                    row_iter = old_rew_matrix.row_iter(row, row)
-                    for entry in row_iter:
-                        new_column = quotient.old_to_new_state_mapping[entry.column]
-                        transRewMatrixbuilder.add_next_value(new_s, new_column, entry.value())
 
-        new_reward_matrix = transRewMatrixbuilder.build()
-        quotient_reward_models[reward_label] = stormpy.SparseRewardModel(
-            optional_transition_reward_matrix=new_reward_matrix)
-
-    # rebuild matrix, add sink state and transitions to sink from all collapsed MEC states
-    matrixBuilder = stormpy.SparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
-                                                has_custom_row_grouping=True, row_groups=0)
-    cur_row = 0
-    sink = quotient.matrix.nr_columns
-    for state in range(quotient.matrix.nr_columns):
-        matrixBuilder.new_row_group(cur_row)
-        rows = quotient.matrix.get_rows_for_group(state)
-        for row in rows:
-            row_iter = quotient.matrix.row_iter(row, row)
-            for entry in row_iter:
-                assert entry.value() != 0, f"Something went wrong: An entry of the SparseMatrix quotient is 0 for the unfolding for comb {comb}"
-                if (entry.column == state and entry.value() == 1):  # self-loop
-                    matrixBuilder.add_next_value(cur_row, entry.column, entry.value())
-                else:
-                    matrixBuilder.add_next_value(cur_row, sink, 1)
-            cur_row += 1
-
-    # add self-loop on sink
-    matrixBuilder.new_row_group(cur_row)
-    matrixBuilder.add_next_value(cur_row, sink, 1)
-
-    quotient_matrix_with_sink = matrixBuilder.build()
-
-    # label initial state and label sink
-    quotient_state_labeling = stormpy.storage.StateLabeling(quotient.matrix.nr_columns + 1)
-    quotient_state_labeling.add_label("init")
-    quotient_state_labeling.add_label_to_state("init", 0)
-    quotient_state_labeling.add_label("term")
-    quotient_state_labeling.add_label_to_state("term", sink)
-
-    quotient_components_with_rewards = stormpy.SparseModelComponents(
-        transition_matrix=quotient_matrix_with_sink,
-        state_labeling=quotient_state_labeling,
-        reward_models=quotient_reward_models)
-    quotient_with_reward = stormpy.storage.SparseMdp(quotient_components_with_rewards)
-
-    return quotient_with_reward
-
-
-def transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numSum, schedList, targets, coeff):
+def transform_to_moa(model, equivClass, numSum, schedList, targets, coeff, exact):
     curInitLists = {pred: range((numSum * pred) + 1, numSum * (pred + 1) + 1) for pred in equivClass}
     curTargetSets = {pred: set(targets[(numSum * pred):(numSum * (pred + 1))]) for pred in equivClass}
     curCoeffLists = {pred: coeff[((numSum + 1) * pred):((numSum + 1) * (pred + 1))] for pred in equivClass} # including bounds
@@ -246,14 +194,21 @@ def transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numS
     for (comb, rel_ind) in ind_dict.items():
         rel_target_labels = set([targets[i - 1] for i in rel_ind])
         rel_target_states_dict = {target:set(model.parsed_model.labeling.get_states(target)) for target in rel_target_labels}
-        rel_target_states = set.union(*rel_target_states_dict.values())
 
-        # storm build unfolding differently to what we need / want, we want to transition to a new copy *after* seeing a target state
+        # storm builds unfolding differently to how it is defined in the paper
+        # # Paper: all *outgoing* transitions of (the first visit to) a target state lead to a new copy of the MDP
+        # #        Thus we can define *state-based* reward-structures collecting reward on the first visit to a target
+        # # Storm: all *incoming* transitions of (the first visit to) a target state lead to a new copy of the MDP
+        # #        Thus we have to define *transition-based* reward-structures collecting reward on the first *transition towards* a target state
+
         # build memory structure for each set of target states
         memorystructures = []
         for i in rel_ind:
             goalstates = model.parsed_model.labeling.get_states(targets[i - 1])
-            memoryBuilder = stormpy.storage.MemoryStructureBuilder(2, model.parsed_model, False)
+            if exact:
+                memoryBuilder = stormpy.storage.MemoryStructureBuilderExact(2, model.parsed_model, False)
+            else:
+                memoryBuilder = stormpy.storage.MemoryStructureBuilder(2, model.parsed_model, False)
             memoryBuilder.set_transition(0, 0, ~goalstates)
             memoryBuilder.set_transition(0, 1, goalstates)
             memoryBuilder.set_transition(1, 1, stormpy.BitVector(model.parsed_model.nr_states, True))
@@ -272,16 +227,22 @@ def transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numS
 
 
     ## Construct combined MDP
-    matrixBuilder = stormpy.SparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
-                                          has_custom_row_grouping=True, row_groups=0)
+    if exact:
+        matrixBuilder = stormpy.ExactSparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
+                                              has_custom_row_grouping=True, row_groups=0)
+    else:
+        matrixBuilder = stormpy.SparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
+                                                    has_custom_row_grouping=True, row_groups=0)
     nr_comb = len(ind_dict.keys())
     cur_row = 0
     cur_group = 0
     successors = {}
 
-    # initial state: fresh, transitions to initial state of each unfolding with prob
-    accumulated_nr_states = 0
+    # initial state: fresh state
     matrixBuilder.new_row_group(0)
+
+    # From the initial state we transition to the initial state of each unfolding with equal prob
+    accumulated_nr_states = 0
     successors[0] = set()
     for (comb, rel_ind) in ind_dict.items():
         init_label = "init" + str(rel_ind[0])
@@ -289,7 +250,10 @@ def transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numS
         assert len(
             init_states) == 1, f"No or more than a single state is labeled with {init_label} in the goal unfolding for {comb}"
         mapped_init_state = accumulated_nr_states + init_states[0] + 1
-        matrixBuilder.add_next_value(cur_row, mapped_init_state, 1 / nr_comb)  # todo vs exact?
+        if exact:
+            matrixBuilder.add_next_value(cur_row, mapped_init_state, Rational(1 / nr_comb))  # todo vs exact?
+        else:
+            matrixBuilder.add_next_value(cur_row, mapped_init_state, 1 / nr_comb)
         accumulated_nr_states += unfoldings[comb].nr_states
         successors[0].add(mapped_init_state)
     cur_row += 1
@@ -301,11 +265,10 @@ def transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numS
     new_states_to_comb = {}
     for (comb, rel_ind) in ind_dict.items():
         rel_target_labels = set([targets[i - 1] for i in rel_ind])
-        for state in range(unfoldings[comb].nr_states): #todo vs model.states
+        for state in range(unfoldings[comb].nr_states):
             # state: state in unfolding[comb]
             # cur_group: corresponding state in combined MDP
             successors[cur_group] = set()
-            # cur_state_is_target = {target: (state in unfoldings[comb].labeling.get_states(target)) for target in rel_target_labels}
             matrixBuilder.new_row_group(cur_row)
             rows = unfoldings[comb].transition_matrix.get_rows_for_group(state)
             for row in rows:
@@ -313,16 +276,13 @@ def transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numS
                 for entry in row_iter:
                     assert entry.value() != 0, f"Something went wrong: An entry of the SparseMatrix quotient is 0 for the unfolding for comb {comb}"
                     mapped_succ_state = entry.column + accumulated_nr_states + 1
-                    matrixBuilder.add_next_value(cur_row, mapped_succ_state, entry.value())
+                    matrixBuilder.add_next_value(cur_row, mapped_succ_state, entry.value()) # entry.value() is Rational if exact
                     successors[cur_group].add(mapped_succ_state)
                 cur_row += 1
             for target in rel_target_labels:
                 # remember which states correspond to target states
                 if state in unfoldings[comb].labeling.get_states(target):
                     new_target_states[target].append(cur_group)
-                # remember which states correspond to having already seen the target
-                # if state in unfoldings[comb].labeling.get_states(target) or state in seen[target]:
-                #    seen[target].extend(curr_succ)
             new_states_to_comb[cur_group] = comb
             cur_group += 1
         accumulated_nr_states += unfoldings[comb].nr_states
@@ -344,7 +304,6 @@ def transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numS
             target_succ[target].update(visited)
 
     ## Set up reward structures on each unfolded MDP, scaled by nr_comb
-    # todo vs would I need optional_state_action_reward_vector
     common.colourinfo("Setting up reward structures...")
     reward_models = {}
     for (pred, targetSet) in curTargetSets.items():
@@ -354,8 +313,12 @@ def transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numS
             for i in set(rel_ind).intersection(set(curInitLists[pred])): # both lists do not contain duplicates anyways
                 accCoeffByTargetAndComb[(targets[i-1],comb)] += curCoeffLists[pred][i - (numSum * pred) - 1]
 
-        transRewMatrixbuilder = stormpy.SparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
-                                                            has_custom_row_grouping=True, row_groups=0)
+        if exact:
+            transRewMatrixbuilder = stormpy.ExactSparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
+                                                                     has_custom_row_grouping=True, row_groups=0)
+        else:
+            transRewMatrixbuilder = stormpy.SparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
+                                                                has_custom_row_grouping=True, row_groups=0)
         cur_row = 0
         for state in range(0, processed_matrix.nr_columns):
             rows = processed_matrix.get_rows_for_group(state)
@@ -365,162 +328,126 @@ def transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numS
                 for entry in row_iter:
                     accVal = 0
                     for target in targetSet:
+                        # check whether entry is a transition
                         if entry.column in target_succ[target] and (not state in target_succ[target]):
                             cur_comb = new_states_to_comb[entry.column]
                             accVal += accCoeffByTargetAndComb[(target, cur_comb)] * nr_comb
-                    if accVal != 0:
-                        print(str(state) + " to " + str(entry.column) + " has rew " + str(accVal))
-                    transRewMatrixbuilder.add_next_value(row, entry.column, accVal)
-                    # transRewMatrixbuilder.add_next_value(cur_row, entry.column, accVal)  # ERROR (StandardMdpPcaaWeightVectorChecker.cpp:39): Reward model has transition rewards which is not expected.
-                    # if not (entry.column, accVal) in transition_set:
-                    #    transition_set.add((entry.column, accVal))
-                    # transRewMatrixbuilder.add_next_value(row, entry.column, accVal) # ERROR (SparseMatrix.cpp:243): Cannot insert value at illegal column 137316596308400.
-                    # transRewMatrixbuilder.add_next_value(cur_row, entry.column, accVal) # same as above
-                    # transRewMatrixbuilder.add_next_value(state, entry.column, accVal) # Process finished with exit code 139 (interrupted by signal 11:SIGSEGV)
+
+                    if exact:
+                        transRewMatrixbuilder.add_next_value(row, entry.column, Rational(accVal))
+                    else:
+                        transRewMatrixbuilder.add_next_value(row, entry.column, accVal)
                 cur_row += 1
         transition_reward_matrix = transRewMatrixbuilder.build()
-        reward_models[f"R{pred}"] = stormpy.SparseRewardModel(optional_transition_reward_matrix=transition_reward_matrix)
-
-    state_labeling = stormpy.storage.StateLabeling(processed_nr_states)
-    state_labeling.add_label("init")
-    state_labeling.add_label_to_state("init", 0)
-    components = stormpy.SparseModelComponents(transition_matrix=processed_matrix, state_labeling=state_labeling, reward_models=reward_models)
-    processed_model = stormpy.storage.SparseMdp(components)
-
-    return processed_model
-
-
-def transform_to_moa_for_absorb(model, equivClass, scheds_by_pred, numScheds, numInit, numSum, schedList, targets, coeff):
-    curInitLists = {pred: range((numSum * pred) + 1, numSum * (pred + 1) + 1) for pred in equivClass}
-    curTargetSets = {pred: set(targets[(numSum * pred):(numSum * (pred + 1))]) for pred in equivClass}
-    all_target_labels = set.union(*[set(x) for x in curTargetSets.values()])
-    all_target_states = set.union(*[set(model.parsed_model.labeling.get_states(target)) for target in all_target_labels])
-    curCoeffLists = {pred: coeff[((numSum + 1) * pred):((numSum + 1) * (pred + 1))] for pred in equivClass}  # including bounds
-
-    # Step 1: Collect state-scheduler combinations, also split by conjunct
-    state_sched_comb = set()
-    ind_dict = {}
-    for i in chain.from_iterable(curInitLists.values()):
-        states_i = list(model.parsed_model.labeling.get_states(f"init{i}"))
-        assert len(states_i) == 1, f"No or more than a single state is labeled with init{i}"
-        comb = (states_i[0], schedList[i - 1])
-        state_sched_comb.add(comb)
-        if comb in ind_dict.keys():
-            ind_dict[comb].append(i)
+        if exact:
+            reward_models[f"R{pred}"] = stormpy.SparseExactRewardModel(optional_transition_reward_matrix=transition_reward_matrix)
         else:
-            ind_dict[comb] = [i]
-    common.colourinfo("State-scheduler combinations and associated initial state label indices: " + str(ind_dict))
+            reward_models[f"R{pred}"] = stormpy.SparseRewardModel(optional_transition_reward_matrix=transition_reward_matrix)
 
-    ## Construct combined MDP
-    matrixBuilder = stormpy.SparseMatrixBuilder(rows=0, columns=0, entries=0, force_dimensions=False,
-                                                has_custom_row_grouping=True, row_groups=0)
-    nr_comb = len(ind_dict.keys())
-    cur_row = 0
-    cur_group = 0
-    successors = {}
-
-    # initial state: fresh, transitions to initial state of each copy with equal prob
-    accumulated_nr_states = 0
-    matrixBuilder.new_row_group(0)
-    successors[0] = set()
-    for (comb, rel_ind) in ind_dict.items():
-        init_label = "init" + str(rel_ind[0])
-        init_states = list(model.parsed_model.labeling.get_states(init_label))
-        assert len(
-            init_states) == 1, f"No or more than a single state is labeled with {init_label} in the goal unfolding for {comb}"
-        mapped_init_state = accumulated_nr_states + init_states[0] + 1
-        matrixBuilder.add_next_value(cur_row, mapped_init_state, 1 / nr_comb)  # todo vs exact?
-        accumulated_nr_states += model.parsed_model.nr_states
-        successors[0].add(mapped_init_state)
-    cur_row += 1
-    cur_group += 1
-    total_nr_states = accumulated_nr_states
-
-    # add a copy of the MDP for each state-sched combination
-    accumulated_nr_states = 0
-    nr_sink_transitions = 0
-    new_sinks = set()
-    new_target_states_by_target = {target: set() for target in set.union(*curTargetSets.values())}
-    new_target_states = set()
-    new_states_to_comb = {}
-    for (comb, rel_ind) in ind_dict.items():
-        rel_target_labels = set([targets[i - 1] for i in rel_ind])
-        for state in range(model.parsed_model.nr_states):  # todo vs model.states
-            # state: state in unfolding[comb]
-            # cur_group: corresponding state in combined MDP
-            successors[cur_group] = set()
-            # cur_state_is_target = {target: (state in unfoldings[comb].labeling.get_states(target)) for target in rel_target_labels}
-            matrixBuilder.new_row_group(cur_row)
-
-            is_target = False
-            for target in rel_target_labels:
-                # remember which states correspond to target states
-                if state in model.parsed_model.labeling.get_states(target):
-                    new_target_states_by_target[target].add(cur_group)
-                    new_target_states.add(cur_group)
-                    is_target = True
-                # remember which states correspond to having already seen the target
-                # if state in unfoldings[comb].labeling.get_states(target) or state in seen[target]:
-                #    seen[target].extend(curr_succ)
-            if is_target:
-                new_sink = total_nr_states + nr_sink_transitions + 1
-                matrixBuilder.add_next_value(cur_row, new_sink, 1)
-                new_sinks.add(new_sink)
-                new_states_to_comb[new_sink] = comb
-                cur_row += 1
-                nr_sink_transitions += 1
-            else:
-                rows = model.parsed_model.transition_matrix.get_rows_for_group(state)
-                for row in rows:
-                    row_iter = model.parsed_model.transition_matrix.row_iter(row, row)
-                    for entry in row_iter:
-                        assert entry.value() != 0, f"Something went wrong: An entry of the SparseMatrix quotient is 0 for the unfolding for comb {comb}"
-                        mapped_succ_state = accumulated_nr_states + entry.column + 1
-                        matrixBuilder.add_next_value(cur_row, mapped_succ_state, entry.value())
-                        successors[cur_group].add(mapped_succ_state)
-                    cur_row += 1
-            new_states_to_comb[cur_group] = comb
-            cur_group += 1
-        accumulated_nr_states += model.parsed_model.nr_states
-    for sink in new_sinks:
-        print("sink: " + str(sink) + " cur group: " + str(cur_group))
-        matrixBuilder.new_row_group(cur_row)
-        matrixBuilder.add_next_value(cur_row, cur_group, 1)
-        cur_row += 1
-        cur_group += 1
-
-    processed_nr_states = cur_group
-    processed_matrix = matrixBuilder.build()
-
-    ## Set up reward structures on each unfolded MDP, scaled by nr_comb
-    common.colourinfo("Setting up reward structures...")
-    reward_models = {}
-    for (pred, targetSet) in curTargetSets.items():
-        state_rewards = [0 for state in range(processed_nr_states)]
-        # for each target collect all coefficients for this target in this predicate
-        accCoeffByTargetAndComb = {(target, comb): 0 for target in targetSet for comb in ind_dict.keys()}
-        for (comb, rel_ind) in ind_dict.items():
-            for i in set(rel_ind).intersection(set(curInitLists[pred])):  # both lists do not contain duplicates anyways
-                accCoeffByTargetAndComb[(targets[i - 1], comb)] += curCoeffLists[pred][i - (numSum * pred) - 1]
-
-        for new_target in new_target_states:
-            cur_comb = new_states_to_comb[new_target]
-            accVal = 0
-            for target in targetSet:
-                if new_target in new_target_states_by_target[target]:
-                    accVal += accCoeffByTargetAndComb[(target, cur_comb)] * nr_comb
-            state_rewards[new_target] = accVal
-
-        reward_models[f"R{pred}"] = stormpy.SparseRewardModel(optional_state_reward_vector=state_rewards)
-
+    # Label the initial state
     state_labeling = stormpy.storage.StateLabeling(processed_nr_states)
     state_labeling.add_label("init")
     state_labeling.add_label_to_state("init", 0)
-    components = stormpy.SparseModelComponents(transition_matrix=processed_matrix, state_labeling=state_labeling,
-                                               reward_models=reward_models)
-    processed_model = stormpy.storage.SparseMdp(components)
+
+    # Build the model
+    if exact:
+        components = stormpy.SparseExactModelComponents(transition_matrix=processed_matrix, state_labeling=state_labeling,
+                                                   reward_models=reward_models)
+        processed_model = stormpy.storage.SparseExactMdp(components)
+    else:
+        components = stormpy.SparseModelComponents(transition_matrix=processed_matrix, state_labeling=state_labeling,
+                                                   reward_models=reward_models)
+        processed_model = stormpy.storage.SparseMdp(components)
 
     return processed_model
+
+def mc_moa(model, numPred, numInit, schedList, targets, coeff, compOp, epsilon, exact):
+    # Step 0: partition the set of predicate indices
+    numSum = int(numInit / numPred)  # number of summands per predicate
+    scheds_by_pred = {pred: set(schedList[(numSum * pred):(numSum * (pred + 1))]) for pred in range(numPred)}
+    partition = {}
+    seenScheds = set()
+    for pred in range(numPred):
+        foundClass = False
+        for predp in range(pred):
+            if scheds_by_pred[pred].intersection(scheds_by_pred[predp]) != set():
+                partition[predp].append(pred)
+                foundClass = True
+                break
+        if not foundClass:
+            partition[pred] = [pred]
+            seenScheds = seenScheds.union(scheds_by_pred[pred])
+
+    common.colourinfo("Partitioned property into classes of predicates: " + str(partition.values()))
+
+    resList = []
+    representatives = set(partition.keys())
+    while representatives != set() and (not (True in resList)):
+        # if we could already satisfy the property for a previously checked element of the partition, we do not need to check the others anymore
+
+        repr = representatives.pop()
+        equivClass = partition[repr]
+        common.colourinfo("Checking the following predicates: " + str(equivClass))
+
+        # Step 2: Construct combined MDP with reward structures (includes Step 1, analysis of state-sched comb)
+        common.colourinfo("Constructing combined MDP...")
+        start_moa_preproc_time = time.perf_counter()
+        processed_model = transform_to_moa(model, equivClass, numSum, schedList, targets, coeff, exact)
+        end_moa_preproc_time = time.perf_counter()
+        common.colourinfo("Constructing the combined MDP took: " + str(
+            round(end_moa_preproc_time - start_moa_preproc_time, 2)) + " seconds",
+                          False)
+
+        # Step 3: Solve MOA query
+        # Construct multi-objective formula for the *negated* property! (I.e. "EXISTS scheduler s.t. ... AND ...")
+        common.colourinfo("Solving MOA query...")
+        # Preparation: Store negated comparison operator for >=, <, <=, < (= not allowed, != handled separately)
+        if compOp == '>=':
+            compOp_negated = '<'
+        elif compOp == '<=':
+            compOp_negated = '>'
+        elif compOp == '>':
+            compOp_negated = '<='
+        elif compOp == '<':
+            compOp_negated = '>='
+
+        # Construct formula iteratively
+        formula_interm = "multi("
+        for pred in equivClass:
+            coeff_cur = coeff[(numSum + 1) * (pred + 1) - 1]
+            if compOp in ['!=']:  # we check the negated property i.e. != becomes =
+                formula_interm += "R{\"R" + str(pred) + "\"}>=" + str(coeff_cur - epsilon) + " [ C ], "
+                formula_interm += "R{\"R" + str(pred) + "\"}<=" + str(coeff_cur + epsilon) + " [ C ], "
+            elif compOp in ['<=', '<', '>=', '>']:
+                formula_interm += "R{\"R" + str(pred) + "\"}" + compOp_negated + str(coeff_cur) + " [ C ], "
+            else:
+                common.colourerror(
+                    "Comparison operator = currently not supported for disjunctive properties (assertions should prevent reaching this point)")
+        formula = formula_interm[:-2] + ")"
+        properties = stormpy.parse_properties(formula)
+
+        # Solve constructed property
+        env = stormpy.Environment()
+        if exact:
+            env.solver_environment.set_force_exact()  
+            env.solver_environment.set_linear_equation_solver_type(stormpy.EquationSolverType.eigen)
+            env.solver_environment.minmax_solver_environment.method = stormpy.MinMaxMethod.policy_iteration
+        else:
+            env.solver_environment.set_force_sound()
+        negated_res = stormpy.model_checking(processed_model,
+                                             properties[0].raw_formula,
+                                             only_initial_states=True,
+                                             environment=env)
+        assert list(processed_model.labeling.get_states("init")) == [0]
+        true_res_at_initial_state = not negated_res.at(0)  # negate result since we checked the negated query
+        resList.append(true_res_at_initial_state)
+        if true_res_at_initial_state:
+            common.colourinfo("Property holds!")
+            return
+
+    if not (True in resList):
+        common.colourinfo("Property does not hold!")
+        return
 
 def main():
     try:
@@ -539,10 +466,6 @@ def main():
 
         exact = input_args.exact
 
-        if exact:
-            common.colourerror("Not implemented!")
-            return 0
-
         # correctness checks
         if compOp in ['=', '!=']:
             epsilon = input_args.epsilon
@@ -557,7 +480,7 @@ def main():
 
         if numPred>1:
             assert (not buechi), "Multi-objective Buechi properties are currently not supported."
-            assert compOp != '=', "= currently not supported for disjunctive properties"
+            assert compOp != '=', "Comparison operator = currently not supported for disjunctive properties"
 
         assert len(targets) == numInit, "Number of target labels does not match number of initial state labels."
         assert len(coeff) == (numInit+numPred), "Number of coefficients does not match number of initial state labels + number of predicates."
@@ -576,201 +499,49 @@ def main():
         common.colourinfo("Number of transitions: {0}".format(model.parsed_model.nr_transitions), False)
         common.colourinfo("Building the model took: " + str(round(parsing_time - start_time, 2)) + " seconds", False)
 
-        # assert each init label labels exactly one state, create state-sched-combinations and store which indices are associated with which initial state
-        if numPred == 1:
-            state_sched_comb = set()
-            ind_dict = {}
-            if buechi:
-                targets_by_comb = {}
-            for i in range(1,numInit+1):
-                states_i = list(model.parsed_model.labeling.get_states(f"init{i}"))
-                assert len(states_i) == 1, f"No or more than a single state is labeled with init{i}"
-                comb = (states_i[0], schedList[i-1])
-                state_sched_comb.add(comb)
-                if comb in ind_dict.keys():
-                    ind_dict[comb].append(i)
-                else:
-                    ind_dict[comb] = [i]
+        if not input_args.checkModel:
+            # assert each init label labels exactly one state, create state-sched-combinations and store which indices are associated with which initial state
+            if numPred == 1: # Single-objective relational property
+                state_sched_comb = set()
+                ind_dict = {}
                 if buechi:
-                    if comb in targets_by_comb.keys():
-                        targets_by_comb[comb].add(targets[i-1])
+                    targets_by_comb = {}
+                for i in range(1,numInit+1):
+                    states_i = list(model.parsed_model.labeling.get_states(f"init{i}"))
+                    assert len(states_i) == 1, f"No or more than a single state is labeled with init{i}"
+                    comb = (states_i[0], schedList[i-1])
+                    state_sched_comb.add(comb)
+                    if comb in ind_dict.keys():
+                        ind_dict[comb].append(i)
                     else:
-                        targets_by_comb[comb] = {targets[i-1]}
-            common.colourinfo("State-scheduler combinations and associated initial state label indices: " + str(ind_dict))
+                        ind_dict[comb] = [i]
+                    if buechi:
+                        if comb in targets_by_comb.keys():
+                            targets_by_comb[comb].add(targets[i-1])
+                        else:
+                            targets_by_comb[comb] = {targets[i-1]}
+                common.colourinfo("State-scheduler combinations and associated initial state label indices: " + str(ind_dict))
 
-            processed_model = model.parsed_model
-            processed_ind_dict = ind_dict
-            processed_targets = targets
-            if buechi:
-                processed_model, processed_ind_dict, processed_targets = buechi_processing(model, ind_dict, numInit, targets, targets_by_comb)
-                assert len(targets) == len(processed_targets), "Number of new targets does not match number of original targets."
+                processed_model = model.parsed_model
+                processed_ind_dict = ind_dict
+                processed_targets = targets
+                if buechi:
+                    processed_model, processed_ind_dict, processed_targets = buechi_processing(model, ind_dict, numInit, targets, targets_by_comb, exact)
+                    assert len(targets) == len(processed_targets), "Number of new targets does not match number of original targets."
 
-            # Model-checking
-            if not input_args.checkModel:
+                # Model-checking
                 modelchecker = ModelChecker(processed_model, processed_ind_dict, processed_targets,
                                             compOp, coeff, exact, epsilon)
                 modelchecker.modelCheck()
-        else:
-            # Step 0: partition
-            numSum = int(numInit / numPred) # number of summands per predicate
-            scheds_by_pred = { pred:set(schedList[(numSum*pred):(numSum*(pred+1))]) for pred in range(numPred) }
-            partition = {}
-            seenScheds = set()
-            for pred in range(numPred):
-                foundClass = False
-                for predp in range(pred):
-                    if scheds_by_pred[pred].intersection(scheds_by_pred[predp]) != set():
-                        partition[predp].append(pred)
-                        foundClass = True
-                        break
-                if not foundClass:
-                    partition[pred] = [pred]
-                    seenScheds = seenScheds.union(scheds_by_pred[pred])
 
-            common.colourinfo("Partitioned property into classes of predicates: " +str(partition.values()))
+            else: # Multi-objective relational property
+                mc_moa(model, numPred, numInit, schedList, targets, coeff, compOp, epsilon, exact)
 
-            resList = []
-            for repr in partition.keys():
-                equivClass = partition[repr]
-                common.colourinfo("Checking the following predicates: "+ str(equivClass))
-
-                # Construct combined MDP
-                common.colourinfo("Constructing combined MDP...")
-                start_moa_preproc_time = time.perf_counter()
-                processed_model = transform_to_moa(model, equivClass, scheds_by_pred, numScheds, numInit, numSum, schedList, targets, coeff)
-                #processed_model = transform_to_moa_for_absorb(model, equivClass, scheds_by_pred, numScheds, numInit, numSum, schedList, targets, coeff)
-                end_moa_preproc_time = time.perf_counter()
-                common.colourinfo("Constructing the combined MDP took: " + str(round(end_moa_preproc_time - start_moa_preproc_time, 2)) + " seconds",
-                                  False)
-                ##### cast to reach
-                # quotient_with_reward = cast_to_reach(processed_model, equivClass)
-                ###
-
-                if not input_args.checkModel:
-                    common.colourinfo("Solving MOA query...")
-                    formula_max_interm = "multi("
-                    formula_min_interm = "multi("
-                    for pred in equivClass:
-                        formula_max_interm += "R{\"R" + str(pred) + "\"}max=? [ C ], "
-                        formula_min_interm += "R{\"R" + str(pred) + "\"}min=? [ C ], "
-                    formula_max = formula_max_interm[:-2] + ")"
-                    formula_min = formula_min_interm[:-2] + ")"
-                    properties_max = stormpy.parse_properties(formula_max)
-                    properties_min = stormpy.parse_properties(formula_min)
-                    weightVectorMax = [1 for _ in equivClass]
-                    weightVectorMin = [1 for _ in equivClass]
-
-                    #### cast to reach
-                    """formula_reach_interm = "multi("
-                    for pred in equivClass:
-                        formula_reach_interm += "R{\"R" + str(pred) + "\"}max=? [F \"term\"], "
-                    formula_reach = formula_reach_interm[:-2] + ")"
-                    properties_reach = stormpy.parse_properties(formula_reach)"""
-                    ###
-
-                    if exact:
-                        pass
-                    else:
-                        ### reach reward
-                        """env = stormpy.Environment()
-                        weighted_reach_model_checker, _ = stormpy._core._make_weighted_objective_mdp_model_checker_Double(env,
-                                                                                                                    quotient_with_reward,
-                                                                                                                    properties_reach[
-                                                                                                                        0].raw_formula)
-                        weighted_reach_model_checker.set_weighted_precision(0.000001)  # todo decide precision
-                        weighted_reach_model_checker.check(env, weightVector)
-                        point_reach = weighted_reach_model_checker.get_achievable_point()"""
-
-
-                        #### total reward
-                        env = stormpy.Environment()
-                        env.solver_environment.set_force_sound()
-                        if compOp in ['>=', '>', '=', '!=']:
-                            weighted_model_checker_max, _ = stormpy._core._make_weighted_objective_mdp_model_checker_Double(
-                                env,
-                                processed_model,
-                                properties_max[0].raw_formula)
-                            weighted_model_checker_max.set_weighted_precision(0.000001)
-                            weighted_model_checker_max.check(env, weightVectorMax)
-                            point_max = weighted_model_checker_max.get_achievable_point()
-                            common.colourinfo("Found Pareto optimal point " + str(point_max) + " for weight vector " + str(weightVectorMax))
-                        # todo just looking at a single point is not complete
-
-                        if compOp in ['<=', '<', '=', '!=']:
-                            weighted_model_checker_min, _ = stormpy._core._make_weighted_objective_mdp_model_checker_Double(
-                                env,
-                                processed_model,
-                                properties_min[0].raw_formula)
-                            weighted_model_checker_min.set_weighted_precision(0.000001)
-                            weighted_model_checker_min.check(env, weightVectorMin)
-                            point_min = weighted_model_checker_min.get_achievable_point()
-                            common.colourinfo(
-                                "Found Pareto optimal point " + str(point_min) + " for weight vector " + str(
-                                    weightVectorMin))
-
-                        bound_vec = [coeff[(numSum + 1) * (pred + 1) - 1] for pred in equivClass]
-                        """if compOp == '!=':
-                            flag = 0
-                            if point_max - bound_vec > epsilon or bound_vec - point_max > epsilon:
-                                flag = 1
-                            if point_min - bound_vec > epsilon or bound_vec - point_min > epsilon:
-                                flag = 1
-                        elif compOp == '=':
-                            flag = 0
-                            if point_max - bound_vec > epsilon or bound_vec - point_max > epsilon:
-                                if (point_min - bound_vec > epsilon or bound_vec - point_min > epsilon):
-                                    flag = 1
-                        else:
-                            flag = 1
-                            for i in range(len(equivClass)):
-                                if compOp == '>':
-                                    if point_max[i] <= bound_vec[i]:
-                                        flag = -1
-                                        break
-                                elif compOp == '>=':
-                                    if point_max[i] < bound_vec[i]:
-                                        flag = -1
-                                        break
-                                elif compOp == '=':
-                                    if point_max[i] - bound_vec[i] > epsilon or bound_vec[i] - point_max[i] > epsilon:
-                                        if (point_min[i] - bound_vec[i] > epsilon or bound_vec[i] - point_min[i] > epsilon):
-                                            flag = 0
-                                            break
-                                # elif compOp == '!=':
-                                #     if point_max[i] - bound_vec[i] <= epsilon and bound_vec[i] - point_max[i] <= epsilon:
-                                #         flag = -1
-                                #         break
-                                #     if point_min[i] - bound_vec[i] <= epsilon and bound_vec[i] - point_min[i] <= epsilon:
-                                #         flag = -1
-                                #         break
-                                elif compOp == '<=':
-                                    if point_min[i] > bound_vec[i]:
-                                        flag = -1
-                                        break
-                                elif compOp == '<':
-                                    if point_min[i] >= bound_vec[i]:
-                                        flag = -1
-                                        break"""
-                        flag = 0
-                        resList.append(flag)
-                        if flag != 1:
-                            break # if this subset of predicates does not hold (or it is unknown) then the full property does not hold (or it is unknown)
-
-            # combine results from resList
-            if not input_args.checkModel:
-                if -1 in resList:
-                    common.colourinfo("The property does not hold (modulo approximate computation)")
-                elif 0 in resList:
-                    common.colourinfo("Result unknown. Computation is not sound or complete")
-                else:
-                    common.colourinfo("Property holds!")
-            # todo add statistics for MORelReach
-
-        # Output statistics
-        end_time = time.perf_counter()
-        common.colourinfo(f"{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")}: Finished. Statistics:")
-        common.colourinfo("Solving took: " + str(round(end_time - parsing_time, 2)) + " seconds", False) # everything except building the original MDP
-        common.colourinfo("Total time (solving + building original MDP): " + str(round(end_time - start_time, 2)) + " seconds", False)
+            # Output statistics
+            end_time = time.perf_counter()
+            common.colourinfo(f"{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")}: Finished. Statistics:")
+            common.colourinfo("Solving took: " + str(round(end_time - parsing_time, 2)) + " seconds", False) # everything except building the original MDP
+            common.colourinfo("Total time (solving + building original MDP): " + str(round(end_time - start_time, 2)) + " seconds", False)
 
     except Exception as err:
         common.colourerror("Unexpected error encountered: " + str(err))

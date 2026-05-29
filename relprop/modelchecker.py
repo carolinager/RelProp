@@ -1,13 +1,8 @@
-from unittest import skip
-
 import stormpy
+from stormpy import Rational
 from relprop.utility import common
-# from pycarl.gmp.gmp import Rational # pycarl is now part of stormpy
 
-from contextlib import redirect_stdout
 import datetime
-import os
-
 
 class ModelChecker:
     def __init__(self, model, ind_dict, targets, compOp, coeff, exact, epsilon):
@@ -20,7 +15,7 @@ class ModelChecker:
         self.epsilon = epsilon
 
     # computing optimal values (as specified in formula) for a state-scheduler combination c with |relInd(c)|=1
-    def modelCheckSingle(self, formula, state, schedind, rel_coeff, res_dict):
+    def modelCheckSingle(self, formula, state, rel_coeff):
         properties = stormpy.parse_properties(formula)
         env = stormpy.Environment()
 
@@ -39,7 +34,7 @@ class ModelChecker:
 
         if self.exact:
             res_weighted = Rational(rel_coeff) * res_at_state
-            res_dict[(state, schedind)] = res_weighted
+            return res_weighted
         else:
             res_weighted = rel_coeff * res_at_state
             # stormpy.model_checking currently does not return sound lower and upper bound but (lower + upper)/2
@@ -51,62 +46,43 @@ class ModelChecker:
             else:
                 res_opt_under = res_weighted / (1 - 0.000001)
                 res_opt_over = res_weighted / (1 + 0.000001)
-            res_dict[(state, schedind)] = (res_opt_under, res_opt_over)
-
-        return res_dict
+            return (res_opt_under, res_opt_over)
 
     # computing optimal values (as specified in formula) for a state-scheduler combination c with |relInd(c)|>1
-    def modelCheckMulti(self, formula, state, schedind, weight_vec, res_dict):
+    def modelCheckMulti(self, formula, weight_vec, direction):
         properties = stormpy.parse_properties(formula)
         env = stormpy.Environment()
 
         if self.exact:
-            #todo check
             env.solver_environment.set_force_exact()
             env.solver_environment.set_linear_equation_solver_type(stormpy.EquationSolverType.eigen)
             env.solver_environment.minmax_solver_environment.method = stormpy.MinMaxMethod.policy_iteration
+        else:
+            env.solver_environment.set_force_sound()
 
-            weighted_model_checker, inverter = stormpy._core._make_weighted_objective_mdp_model_checker_exact(env,
-                                                                                                               self.model,
-                                                                                                               properties[0].raw_formula,
-                                                                                                               compute_scheduler=False)
+        weighted_model_checker, _ = stormpy.make_weighted_objective_mdp_model_checker(env,
+                                                                                      self.model,
+                                                                                      properties[0].raw_formula,
+                                                                                      compute_scheduler=False)
+
+        if self.exact:
+            weighted_model_checker.set_weighted_precision(0)
             weighted_model_checker.check(env, [Rational(r) for r in weight_vec])
-            # todo ensure initial state is the one we are indeed interested in
 
             res_weighted = weighted_model_checker.get_optimal_weighted_sum()
 
-            """res_weighted, _, sched = stormpy.compute_rel_reach_helper_exact(env,
-                                                                                  self.model,
-                                                                                  state,
-                                                                                  properties[0].raw_formula,
-                                                                                  [Rational(r) for r in rel_coeffs],
-                                                                                  # weightVector
-                                                                                  )"""
-            res_dict[(state, schedind)] = res_weighted  # helper already did the weighting
+            if direction == 1:
+                return res_weighted
+            elif direction == -1:
+                return -res_weighted
         else:
-            env.solver_environment.set_force_sound()
-            weighted_model_checker, inverter = stormpy._core._make_weighted_objective_mdp_model_checker_Double(env,
-                                                                                                              self.model,
-                                                                                                              properties[0].raw_formula,
-                                                                                                              compute_scheduler=False)
             weighted_model_checker.set_weighted_precision(0.000001)
             weighted_model_checker.check(env, weight_vec)
-            # todo ensure initial state is the one we are indeed interested in
 
             # PcaaWeightVectorChecker computes weighted sum as follows:
             # sum_j weightvector[j] * sign(j) * get_achievable_point()[j]
             # where sign(j) = -1 if jth objective is minimizing and sign(j)=1 otherwise
             res_weighted = weighted_model_checker.get_optimal_weighted_sum()
-            """
-            begin old call:
-            res_weighted, _, sched = stormpy.compute_rel_reach_helper(env,
-                                                                      self.model,
-                                                                      state,
-                                                                      properties[0].raw_formula,
-                                                                      rel_coeffs,  # weightVector
-                                                                      )
-            end old call
-            """
 
             # StandardPcaaWeightVectorChecker currently returns res := (lower + upper)/2 for both under- and over-Approx
             # where lower <= exact_res <= upper
@@ -118,16 +94,18 @@ class ModelChecker:
             else:
                 res_under = res_weighted / (1 - 0.000001)
                 res_over = res_weighted / (1 + 0.000001)
-            res_dict[(state, schedind)] = (res_under, res_over)
+            if direction == 1:
+                return (res_under, res_over)
+            elif direction == -1:
+                return (- res_over, - res_under)
 
-        return res_dict
 
     # Main model-checking function
     def modelCheck(self):
         # Step 3: compute min and/or max for each state-scheduler combination
         # for each combination, we store: if exact: single exact result, else tuples consisting of lower and upper bound
-        res_min_dict = {k: [] for k in self.ind_dict.keys()}
-        res_max_dict = {k: [] for k in self.ind_dict.keys()}
+        res_min_dict = {k: 0 for k in self.ind_dict.keys()}
+        res_max_dict = {k: 0 for k in self.ind_dict.keys()}
 
         if self.exact:
             bound = Rational(self.coeff[-1])
@@ -160,31 +138,35 @@ class ModelChecker:
                     else:
                         # max {q * P(F a)} = q * min {P(F a)} for q<0
                         formula = "Pmin=? [F \"" + rel_target + "\"]"
-                    print(formula)
-                    res_max_dict = self.modelCheckSingle(formula, state, schedind, rel_coeff, res_max_dict)
+
+                    common.colourinfo("Checking formula " + str(formula) + " for comb " + str((state, schedind)), False)
+                    res_max_dict[(state, schedind)] = self.modelCheckSingle(formula, state, rel_coeff)
 
                 else:
                     # we need to use multi-objective model-checking
                     rel_targets = [self.targets[i - 1] for i in rel_ind]
                     rel_coeffs = [self.coeff[i - 1] for i in rel_ind]
 
-                    # create proper input for PcaaWeightVectorChecker
+                    # create MOA query with positive weight-vector and min/max objectives
                     weight_vec = []
-
-                    # stormpy takes care of correct weighting with weightVector=rel_coeffs and optimizing in correct direction
                     formula_interm = "multi("
-                    for i in range(len(rel_targets)):
+                    for i in range(len(rel_ind)):
+                        coeff = rel_coeffs[i]
                         target = rel_targets[i]
-                        rel_coeff = rel_coeffs[i]
-                        if rel_coeff >= 0:
+                        if coeff >= 0:
+                            # max {q * P(F a)} = q * max {P(F a)} for q>=0
                             formula_interm += "Pmax=?  [F \"" + target + "\"], "
-                            weight_vec.append(rel_coeff)
+                            weight_vec.append(coeff)
                         else:
+                            # max {q * P(F a)} = q * min {P(F a)} for q<0
                             formula_interm += "Pmin=?  [F \"" + target + "\"], "
-                            weight_vec.append(-1 * rel_coeff)
+                            weight_vec.append(-1 * coeff) # stormpy takes care of correct weighting
                     formula = formula_interm[:-2] + ")"
-                    print(formula)
-                    res_max_dict = self.modelCheckMulti(formula, state, schedind, weight_vec, res_max_dict)
+
+                    common.colourinfo("Checking formula " + str(formula) + " for comb " + str((state, schedind)), False)
+                    direction = 1
+                    assert state==0, "Implementation currently expects all initial states to be 0 for properties with multiple init labels referring to the same state"
+                    res_max_dict[(state, schedind)] = self.modelCheckMulti(formula, weight_vec, direction)
 
 
             # Compute the sums
@@ -234,30 +216,41 @@ class ModelChecker:
                     rel_target = self.targets[rel_ind[0] - 1]
                     rel_coeff = self.coeff[rel_ind[0] - 1]
                     if rel_coeff >= 0:
-                        # max {q * P(F a)} = q * max {P(F a)} for q>=0
+                        # min {q * P(F a)} = q * min {P(F a)} for q>=0
                         formula = "Pmin=? [F \"" + rel_target + "\"]"
                     else:
                         # max {q * P(F a)} = q * min {P(F a)} for q<0
                         formula = "Pmax=? [F \"" + rel_target + "\"]"
 
-                    res_min_dict = self.modelCheckSingle(formula, state, schedind, rel_coeff, res_min_dict)
+                    common.colourinfo("Checking formula " + str(formula) + " for comb " + str((state, schedind)), False)
+                    res_min_dict[(state, schedind)] = self.modelCheckSingle(formula, state, rel_coeff)
 
                 else:
                     # we need to use multi-objective model-checking
                     rel_targets = [self.targets[i - 1] for i in rel_ind]
                     rel_coeffs = [self.coeff[i - 1] for i in rel_ind]
 
-                    # PcaaWeightVectorChecker computes weighted sum as follows:
-                    # sum_j weightvector[j] * sign(j) * get_achievable_point()[j]
-                    # where sign(j) = -1 if jth objective is minimizing and sign(j)=1 otherwise
-
                     # stormpy takes care of correct weighting with weightVector=rel_coeffs and optimizing in correct direction
+                    weight_vec = []
                     formula_interm = "multi("
-                    for target in rel_targets:
-                        formula_interm += "Pmin=?  [F \"" + target + "\"], "
+                    for i in range(len(rel_ind)):
+                        coeff = rel_coeffs[i]
+                        target = rel_targets[i]
+                        if coeff >= 0:
+                            # min {q * P(F a)} = q * min {P(F a)} for q>=0
+                            formula_interm += "Pmin=?  [F \"" + target + "\"], "
+                            weight_vec.append(coeff)
+                        else:
+                            # min {q * P(F a)} = q * max {P(F a)} for q<0
+                            formula_interm += "Pmax=?  [F \"" + target + "\"], "
+                            weight_vec.append(-1 * coeff)
                     formula = formula_interm[:-2] + ")"
 
-                    res_min_dict = self.modelCheckMulti(formula, state, schedind, rel_coeffs, res_min_dict)
+                    # storm computes weighted sum by weighing min obj negatively and max obj positively, we want the opposite here
+                    common.colourinfo("Checking formula " + str(formula) + " for comb " + str((state, schedind)), False)
+                    direction = -1
+                    assert state==0, "Implementation currently expects all initial states to be 0 for properties with multiple init labels referring to the same state"
+                    res_min_dict[(state,schedind)] = self.modelCheckMulti(formula, weight_vec, direction)
 
             # Compute the sum(s)
             common.colourinfo(

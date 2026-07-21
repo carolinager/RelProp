@@ -455,11 +455,12 @@ def main():
         input_args = parseArguments()
 
         model = Model(input_args.modelPath)
+        numPred = input_args.numPred  # l
         numScheds = input_args.numScheds # n
         numInit = input_args.numInit # m*l
-        schedList = input_args.schedList # family of indices k_1 ... k_m
+        schedList = input_args.schedList # family of indices k_1 ... k_m / for m-o: k_1,1, ..., k_m,l
         targets = input_args.targets
-        coeff = input_args.coefficient # q_1, ..., q_m, q
+        coeff = input_args.coefficient # q_1, ..., q_m, q / for m-o: q_1,1, ..., q_m,1, q_1, q_1,2, ..., q_m,l, q_l (coeff q_1, ...,q_l are interpreted as bound)
         compOp = input_args.comparisonOperator
         buechi = input_args.buechi
 
@@ -477,8 +478,12 @@ def main():
             common.colourerror("Unnecessary schedulers quantified: Number of initial state labels < number of schedulers. Will assume numScheds := numInit.")
             numScheds = numInit
 
+        if numPred>1:
+            assert (not buechi), "Multi-objective Buechi properties are currently not supported."
+            assert compOp != '=', "Comparison operator = currently not supported for disjunctive properties"
+
         assert len(targets) == numInit, "Number of target labels does not match number of initial state labels."
-        assert len(coeff) == (numInit+1), "Number of coefficients does not match number of initial state labels + number of predicates."
+        assert len(coeff) == (numInit+numPred), "Number of coefficients does not match number of initial state labels + number of predicates."
         assert len(schedList) == numInit, "Size of scheduler list does not match number of initial state labels."
         assert set(schedList) == set(range(1,numScheds+1)), "List of schedulers does not cover the range {1,...,numScheds} or exceeds it."
 
@@ -488,7 +493,7 @@ def main():
         options.set_build_all_labels()
 
         common.colourinfo(f"{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")}: Parsing + building model...")
-        model.parseModel(False, options)
+        model.parseModel(exact, options)
         parsing_time = time.perf_counter()
         common.colourinfo("Number of states: {0}".format(model.parsed_model.nr_states), False)
         common.colourinfo("Number of transitions: {0}".format(model.parsed_model.nr_transitions), False)

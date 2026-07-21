@@ -5,12 +5,13 @@ from relprop.utility import common
 import datetime
 
 class ModelChecker:
-    def __init__(self, model, ind_dict, targets, compOp, coeff, epsilon):
+    def __init__(self, model, ind_dict, targets, compOp, coeff, exact, epsilon):
         self.model = model
         self.ind_dict = ind_dict
         self.targets = targets
         self.compOp = compOp
         self.coeff = coeff
+        self.exact = exact
         self.epsilon = epsilon
 
     # computing optimal values (as specified in formula) for a state-scheduler combination c with |relInd(c)|=1
@@ -18,7 +19,12 @@ class ModelChecker:
         properties = stormpy.parse_properties(formula)
         env = stormpy.Environment()
 
-        env.solver_environment.set_force_sound()
+        if self.exact:
+            env.solver_environment.set_force_exact()
+            env.solver_environment.set_linear_equation_solver_type(stormpy.EquationSolverType.eigen)
+            env.solver_environment.minmax_solver_environment.method = stormpy.MinMaxMethod.policy_iteration
+        else:
+            env.solver_environment.set_force_sound()
 
         res = stormpy.model_checking(self.model,
                                      properties[0].raw_formula,
@@ -101,9 +107,14 @@ class ModelChecker:
         res_min_dict = {k: 0 for k in self.ind_dict.keys()}
         res_max_dict = {k: 0 for k in self.ind_dict.keys()}
 
-        bound = self.coeff[-1]
-        bound_upper = bound + self.epsilon
-        bound_lower = bound - self.epsilon
+        if self.exact:
+            bound = Rational(self.coeff[-1])
+            bound_upper = bound + Rational(self.epsilon)
+            bound_lower = bound - Rational(self.epsilon)
+        else:
+            bound = self.coeff[-1]
+            bound_upper = bound + self.epsilon
+            bound_lower = bound - self.epsilon
         bound_upper_str = str(float(bound_upper)) + " (specified bound + epsilon)"
         bound_lower_str = str(float(bound_lower)) + " (specified bound - epsilon)"
 
@@ -162,11 +173,15 @@ class ModelChecker:
             common.colourinfo(
                 f"{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")}: Aggregating maximal values...")
             max_sum_list = list(res_max_dict.values())
-
-            max_sum_lower = sum([l for (l, _) in max_sum_list])
-            max_sum_upper = sum([u for (_, u) in max_sum_list])
-            common.colourinfo("Lower bound for max weighted sum: " + str(max_sum_lower), False)
-            common.colourinfo("Upper bound for max weighted sum: " + str(max_sum_upper), False)
+            if self.exact:
+                max_sum = sum(max_sum_list)
+                max_sum_lower, max_sum_upper = max_sum, max_sum
+                common.colourinfo("Max weighted sum: " + str(max_sum), False)
+            else:
+                max_sum_lower = sum([l for (l, _) in max_sum_list])
+                max_sum_upper = sum([u for (_, u) in max_sum_list])
+                common.colourinfo("Lower bound for max weighted sum: " + str(max_sum_lower), False)
+                common.colourinfo("Upper bound for max weighted sum: " + str(max_sum_upper), False)
 
             # for = / !=: check whether we can already conclude the property does not / does hold and terminate early
             if self.compOp == '=':
@@ -242,11 +257,15 @@ class ModelChecker:
                 f"{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")}: Aggregating minimal values...")
 
             min_sum_list = list(res_min_dict.values())
-
-            min_sum_lower = sum([l for (l, _) in min_sum_list])
-            min_sum_upper = sum([u for (_, u) in min_sum_list])
-            common.colourinfo("Lower bound for min weighted sum: " + str(min_sum_lower), False)
-            common.colourinfo("Upper bound for min weighted sum: " + str(min_sum_upper), False)
+            if self.exact:
+                min_sum = sum(min_sum_list)
+                min_sum_lower, min_sum_upper = min_sum, min_sum
+                common.colourinfo("Min weighted sum: " + str(min_sum), False)
+            else:
+                min_sum_lower = sum([l for (l, _) in min_sum_list])
+                min_sum_upper = sum([u for (_, u) in min_sum_list])
+                common.colourinfo("Lower bound for min weighted sum: " + str(min_sum_lower), False)
+                common.colourinfo("Upper bound for min weighted sum: " + str(min_sum_upper), False)
 
 
         # Step 4: Compare sum(s) to bound, output result with brief explanation
@@ -281,6 +300,7 @@ class ModelChecker:
 
             elif max_sum_upper >= bound:
                 # this can only happen if we do not do exact computations
+                assert (not self.exact), "Something went wrong. upper bound of max sum >= bound but lower bound of max sum < bound even though we do exact computations"
                 common.colourinfo(
                     "Result unknown. "
                     "The lower bound for the max weighted sum is < specified bound " + str(

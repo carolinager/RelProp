@@ -114,7 +114,7 @@ relates to the bound $q$ (i.e., the last element of ```coefficients```) as speci
 - IJ: ```--modelPath ./benchmark/IJ/ij_3.nm --numInit 2 --numScheds 1 --schedList 1 1 --targets t2 t3 --coefficient 1 -1 0 --buechi```
   - Returns "Yes" instantly
   - For the other values for N: Change targets to ```--targets t{N-1} t{N}```
-- IJ-boycott: ```--modelPath ./benchmark/IJ/ij_a_3.nm --numInit 2 --numScheds 1 --schedList 1 1 --targets t2 t3 --coefficient 1 -1 0 --buechi```
+- IJ-asym: ```--modelPath ./benchmark/IJ/ij_a_3.nm --numInit 2 --numScheds 1 --schedList 1 1 --targets t2 t3 --coefficient 1 -1 0 --buechi```
   - Returns "No" instantly
   - For the other values for N: Change targets to ```--targets t{N-1} t{N}```
 
@@ -135,8 +135,8 @@ relates to the bound $q$ (i.e., the last element of ```coefficients```) as speci
     - Returns "No" instantly for ```--epsilon``` >= 0.15
 
 ## Tested with:
-- stormpy master branch >= May 28, 2026
-  - Builds correct storm version (1.13.0 master branch)
-  - Includes pycarl for carl-storm 14.34
+- [stormpy master branch](https://github.com/stormchecker/stormpy) >= May 28, 2026
+  - Builds correct storm version ([1.13.0 master branch](https://github.com/stormchecker/storm/releases/tag/1.13.0))
+  - Includes pycarl for [carl-storm 14.34](https://github.com/stormchecker/carl-storm/releases/tag/14.34)
 
 Note: We use assertions for verifying the format of the input arguments. Disable at your own risk

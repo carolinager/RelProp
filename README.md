@@ -38,8 +38,7 @@ DOI: 10.5281/zenodo.15209574
 We assume the model has exactly one state labeled "init{i}" for each i=1, ..., ```numInit```.
 E.g., if ```numInit```=2 we expect there to be exactly one state labeled "init1" and exactly one state labeled "init2".
 Note that this includes models where there is a single state labeled both "init1" and "init2".
-
-TODO: For properties where multiple initial labels label the same state, we currently assume this state to be unique and state 0 of the model.
+Only a singe state should receive the label "init" (it does not matter which one, the procedure only uses the "init{i}" labels).
 
 
 ### Installation (Not recommended)
@@ -50,7 +49,7 @@ git clone https://github.com/carolinager/RelProp
 ```
 
 - Install the dependencies listed in `RelProp/requirements.txt`.
-  Most importantly, RelProp depends on a [fork](https://github.com/carolinager/stormpy/tree/relprop) of [stormpy](https://github.com/moves-rwth/stormpy) which includes [pycarl](https://moves-rwth.github.io/pycarl) and has its own dependencies.
+  Most importantly, RelProp depends on [stormpy](https://github.com/moves-rwth/stormpy) which includes [pycarl](https://moves-rwth.github.io/pycarl) and has its own dependencies.
   Further, stormpy requires [storm](https://www.stormchecker.org) and pycarl requires [carl-storm](https://github.com/moves-rwth/carl-storm/), these are automatically installed when installing stormpy.
   For instructions how to install these dependencies, we refer to the installation instructions provided on the respective websites.
 

@@ -49,7 +49,7 @@ class ModelChecker:
             return (res_opt_under, res_opt_over)
 
     # computing optimal values (as specified in formula) for a state-scheduler combination c with |relInd(c)|>1
-    def modelCheckMulti(self, formula, weight_vec, direction):
+    def modelCheckMulti(self, formula, state, weight_vec, direction):
         properties = stormpy.parse_properties(formula)
         env = stormpy.Environment()
 
@@ -60,8 +60,32 @@ class ModelChecker:
         else:
             env.solver_environment.set_force_sound()
 
+        # Ensure only the given state is labeled "init"
+        processed_model = self.model
+        if not self.model.labeling.has_state_label("init", state):
+            old_labeling = self.model.labeling
+            labels = set.union(*[old_labeling.get_labels_of_state(s) for s in range(self.model.nr_states)])
+            state_labeling = stormpy.storage.StateLabeling(self.model.nr_states)
+            for label in labels:
+                labeled_states = old_labeling.get_states(label)
+                state_labeling.add_label(label)
+                if label == "init":
+                    state_labeling.add_label_to_state("init", state)
+                else:
+                    state_labeling.set_states(label, labeled_states)
+
+            if self.exact:
+                components = stormpy.SparseExactModelComponents(transition_matrix=self.model.transition_matrix,
+                                                                state_labeling=state_labeling)
+                processed_model = stormpy.storage.SparseExactMdp(components)
+            else:
+                components = stormpy.SparseModelComponents(transition_matrix=self.model.transition_matrix,
+                                                           state_labeling=state_labeling)
+                processed_model = stormpy.storage.SparseMdp(components)
+
+
         weighted_model_checker, _ = stormpy.make_weighted_objective_mdp_model_checker(env,
-                                                                                      self.model,
+                                                                                      processed_model,
                                                                                       properties[0].raw_formula,
                                                                                       compute_scheduler=False)
 
@@ -165,8 +189,7 @@ class ModelChecker:
 
                     common.colourinfo("Checking formula " + str(formula) + " for comb " + str((state, schedind)), False)
                     direction = 1
-                    assert state==0, "Implementation currently expects all initial states to be 0 for properties with multiple init labels referring to the same state"
-                    res_max_dict[(state, schedind)] = self.modelCheckMulti(formula, weight_vec, direction)
+                    res_max_dict[(state, schedind)] = self.modelCheckMulti(formula, state, weight_vec, direction)
 
 
             # Compute the sums
@@ -249,8 +272,7 @@ class ModelChecker:
                     # storm computes weighted sum by weighing min obj negatively and max obj positively, we want the opposite here
                     common.colourinfo("Checking formula " + str(formula) + " for comb " + str((state, schedind)), False)
                     direction = -1
-                    assert state==0, "Implementation currently expects all initial states to be 0 for properties with multiple init labels referring to the same state"
-                    res_min_dict[(state,schedind)] = self.modelCheckMulti(formula, weight_vec, direction)
+                    res_min_dict[(state,schedind)] = self.modelCheckMulti(formula, state, weight_vec, direction)
 
             # Compute the sum(s)
             common.colourinfo(

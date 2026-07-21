@@ -438,7 +438,7 @@ def mc_moa(model, numPred, numInit, schedList, targets, coeff, compOp, epsilon, 
                                              properties[0].raw_formula,
                                              only_initial_states=True,
                                              environment=env)
-        assert list(processed_model.labeling.get_states("init")) == [0]
+        assert list(processed_model.labeling.get_states("init")) == [0], "Something went wrong. By construction state 0 should be labeled 'init'"
         true_res_at_initial_state = not negated_res.at(0)  # negate result since we checked the negated query
         resList.append(true_res_at_initial_state)
         if true_res_at_initial_state:

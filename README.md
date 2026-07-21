@@ -3,10 +3,15 @@
 RelProp implements the model-checking algorithms for relational reachability and Büchi properties presented in the paper "Tractable Hyperproperties for MDPs" by Lina Gerlach, Tobias Winkler, Erika Ábrahám, Borzoo Bonakdarpour, and Sebastian Junges.
 More precisely, it allows to check universally quantified relational reachability or Büchi properties
 like "Does it hold for all schedulers that the probability of reaching states labeled a is the same as the probability of reaching states labeled b?"
+as well as disjunctive relational reachability properties.
 RelProp works on top of storm(py).
 Disjunctive relational reachability properties (i.e. the negation of multi-objective relational reachability properties) are not included in the current prototype.
 
 ## Usage
+
+### Docker (Recommended)
+A docker image for the latest release of the tool is provided on [Zenodo](https://www.doi.org/10.5281/zenodo.15209574).
+DOI: 10.5281/zenodo.15209574
 
 ### Arguments:
 #### Required Arguments:
@@ -31,8 +36,10 @@ Disjunctive relational reachability properties (i.e. the negation of multi-objec
 
 ### Assumptions on the Model File
 We assume the model has exactly one state labeled "init{i}" for each i=1, ..., ```numInit```.
-E.g., if numInit=2 we expect there to be exactly one state labeled "init1" and exactly one state labeled "init2".
+E.g., if ```numInit```=2 we expect there to be exactly one state labeled "init1" and exactly one state labeled "init2".
 Note that this includes models where there is a single state labeled both "init1" and "init2".
+
+TODO: For properties where multiple initial labels label the same state, we currently assume this state to be unique and state 0 of the model.
 
 
 ### Installation (Not recommended)
@@ -94,8 +101,8 @@ relates to the bound $q$ (i.e., the last element of ```coefficients```) as speci
   - Returns "No" instantly
 
 #### Different states labeled "init1" and "init2"
-- SD: ```--modelPath ./benchmark/SD/simple/sketch.templ --numInit 2 --numScheds 1 --schedList 1 1 --targets target target --coefficient 1 -1 0 -cop '>'```
-  - Returns "No" instantly for all models, also for ```- cop >=```
+- SD: ```--modelPath ./benchmark/SD/simple/sketch.templ --numInit 2 --numScheds 1 --schedList 1 1 --targets target target --coefficient 1 -1 0 -cop >```
+  - Returns "No" instantly for all models, also for ```- cop '>='```
   - Analogously for the other maze variants
 - TA(1): ```--modelPath ./benchmark/TA/tl_8.nm --numInit 2 --numScheds 1 --schedList 1 1 --targets j0 j0 --coefficient 1 -1 0``` and same for ```j1``` and ```j2```
   - Returns "No" instantly, already for target j0 alone 
@@ -107,15 +114,29 @@ relates to the bound $q$ (i.e., the last element of ```coefficients```) as speci
 - IJ: ```--modelPath ./benchmark/IJ/ij_3.nm --numInit 2 --numScheds 1 --schedList 1 1 --targets t2 t3 --coefficient 1 -1 0 --buechi```
   - Returns "Yes" instantly
   - For the other values for N: Change targets to ```--targets t{N-1} t{N}```
-- IJ-asynch: ```--modelPath ./benchmark/IJ/ij_a_3.nm --numInit 2 --numScheds 1 --schedList 1 1 --targets t2 t3 --coefficient 1 -1 0 --buechi```
+- IJ-boycott: ```--modelPath ./benchmark/IJ/ij_a_3.nm --numInit 2 --numScheds 1 --schedList 1 1 --targets t2 t3 --coefficient 1 -1 0 --buechi```
   - Returns "No" instantly
   - For the other values for N: Change targets to ```--targets t{N-1} t{N}```
 
+### Multi-Objective Reachability Sample Commands
+- FDR: ```--modelPath ./benchmark/FDR/fdr_6.prism --numPred 6 --numInit 12 --numScheds 1 --schedList 1 1 1 1 1 1 1 1 1 1 1 1 --targets d0 d1 d1 d2 d2 d3 d3 d4 d4 d5 d5 d0 --coefficient 1 -1 0 1 -1 0 1 -1 0 1 -1 0 1 -1 0 1 -1 0 -cop !=```
+  - standard / 0.5:
+    - Returns "No" after ~60sec (note this is the negation of the property in the paper)
+    - with ```--exact``` this returns "No" instantly
+  - [0.59,0.61]:
+    - Returns "Yes" instantly (note this is the negation of the property in the paper)
+    - Returns "No" instantly for ```--epsilon``` >= 0.13
+- KY: ```--modelPath ./benchmark/KY/ky_6.prism --numPred 6 --numInit 12 --numScheds 1 --schedList 1 1 1 1 1 1 1 1 1 1 1 1 --targets d0 d1 d1 d2 d2 d3 d3 d4 d4 d5 d5 d0 --coefficient 1 -1 0 1 -1 0 1 -1 0 1 -1 0 1 -1 0 1 -1 0 -cop !=```
+  - standard / 0.5:
+    - Returns "No" after ~100sec (note this is the negation of the property in the paper)
+    - with ```--exact``` this returns "No" instantly
+  - KY [0.59,0.61]: 
+    - Returns "Yes" instantly (note this is the negation of the property in the paper)
+    - Returns "No" instantly for ```--epsilon``` >= 0.15
 
 ## Tested with:
-- stormpy fork, relprop branch: https://github.com/carolinager/stormpy/tree/relprop
-  - Based on [stormpy 1.12.0](https://github.com/stormchecker/stormpy/releases/tag/1.12.0)
-  - Depends on [storm 1.12.0 (master branch)](https://github.com/stormchecker/storm/releases/tag/1.12.0)
-  - Includes pycarl for [carl-storm 14.34](https://github.com/stormchecker/carl-storm/releases/tag/14.34)
+- stormpy master branch >= May 28, 2026
+  - Builds correct storm version (1.13.0 master branch)
+  - Includes pycarl for carl-storm 14.34
 
 Note: We use assertions for verifying the format of the input arguments. Disable at your own risk

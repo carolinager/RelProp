@@ -1,2 +1,2 @@
-stormpy @ git+https://github.com/carolinager/stormpy@relprop
+stormpy
 termcolor
